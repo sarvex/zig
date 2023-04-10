@@ -756,7 +756,12 @@ fn gen(self: *Self) InnerError!void {
             self.max_end_stack = @max(self.max_end_stack, self.next_stack_offset);
 
             const ret_reg = abi.getCAbiIntParamRegs(self.target.*)[0];
-            try self.genSetStack(Type.usize, @intCast(i32, stack_offset), MCValue{ .register = ret_reg }, .{});
+            try self.genSetStack(
+                typeOfAddress(),
+                @intCast(i32, stack_offset),
+                MCValue{ .register = ret_reg },
+                .{},
+            );
             self.ret_mcv = MCValue{ .stack_offset = @intCast(i32, stack_offset) };
             log.debug("gen: spilling {s} to stack at offset {}", .{ @tagName(ret_reg), stack_offset });
         }
@@ -2884,7 +2889,7 @@ fn airArrayElemVal(self: *Self, inst: Air.Inst.Index) !void {
             }));
         },
         .memory_load, .linker_load => {
-            try self.loadMemPtrIntoRegister(addr_reg, Type.usize, array);
+            try self.loadPtrToValueIntoRegister(addr_reg, array);
         },
         else => return self.fail("TODO implement array_elem_val when array is {}", .{array}),
     }
@@ -2892,7 +2897,7 @@ fn airArrayElemVal(self: *Self, inst: Air.Inst.Index) !void {
     // TODO we could allocate register here, but need to expect addr register and potentially
     // offset register.
     const dst_mcv = try self.allocRegOrMem(inst, false);
-    try self.genBinOpMir(.add, Type.usize, .{ .register = addr_reg }, .{ .register = offset_reg });
+    try self.genBinOpMir(.add, typeOfAddress(), .{ .register = addr_reg }, .{ .register = offset_reg });
     try self.load(dst_mcv, .{ .register = addr_reg.to64() }, array_ty);
 
     return self.finishAir(inst, dst_mcv, .{ bin_op.lhs, bin_op.rhs, .none });
@@ -3615,10 +3620,9 @@ fn airLoad(self: *Self, inst: Air.Inst.Index) !void {
     return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
 }
 
-fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue) InnerError!void {
-    switch (ptr) {
+fn loadPtrToValueIntoRegister(self: *Self, reg: Register, mcv: MCValue) InnerError!void {
+    switch (mcv) {
         .linker_load => |load_struct| {
-            const abi_size = @intCast(u32, ptr_ty.abiSize(self.target.*));
             const atom_index = if (self.bin_file.cast(link.File.MachO)) |macho_file| blk: {
                 const atom = try macho_file.getOrCreateAtomForDecl(self.mod_fn.owner_decl);
                 break :blk macho_file.getAtom(atom).getSymbolIndex().?;
@@ -3635,13 +3639,13 @@ fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue
                             .tag = .mov_linker,
                             .ops = .tlv_reloc,
                             .data = .{ .payload = try self.addExtra(Mir.LoadRegisterReloc{
-                                .reg = @enumToInt(registerAlias(.rdi, abi_size)),
+                                .reg = @enumToInt(Register.rdi),
                                 .atom_index = atom_index,
                                 .sym_index = load_struct.sym_index,
                             }) },
                         });
                         try self.asmMemory(.call, Memory.sib(.qword, .{ .base = .rdi }));
-                        try self.genSetReg(ptr_ty, reg, .{ .register = .rax });
+                        try self.genSetReg(typeOfAddress(), reg, .{ .register = .rax });
                     } else return self.fail("TODO emit TLV on other linker backends", .{});
                 },
 
@@ -3650,7 +3654,7 @@ fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue
                         .tag = .lea_linker,
                         .ops = .direct_reloc,
                         .data = .{ .payload = try self.addExtra(Mir.LoadRegisterReloc{
-                            .reg = @enumToInt(registerAlias(reg, abi_size)),
+                            .reg = @enumToInt(reg.to64()),
                             .atom_index = atom_index,
                             .sym_index = load_struct.sym_index,
                         }) },
@@ -3667,7 +3671,7 @@ fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue
                         .tag = .mov_linker,
                         .ops = ops,
                         .data = .{ .payload = try self.addExtra(Mir.LoadRegisterReloc{
-                            .reg = @enumToInt(registerAlias(reg, abi_size)),
+                            .reg = @enumToInt(reg.to64()),
                             .atom_index = atom_index,
                             .sym_index = load_struct.sym_index,
                         }) },
@@ -3680,10 +3684,10 @@ fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue
                 .direct => {
                     // TODO: in case the address fits in an imm32 we can use [ds:imm32]
                     // instead of wasting an instruction copying the address to a register
-                    try self.genSetReg(ptr_ty, reg, .{ .immediate = load_struct.address });
+                    try self.genSetReg(typeOfAddress(), reg, .{ .immediate = load_struct.address });
                 },
                 .got => {
-                    try self.genSetReg(ptr_ty, reg, .{ .immediate = load_struct.address });
+                    try self.genSetReg(typeOfAddress(), reg, .{ .immediate = load_struct.address });
                     try self.asmRegisterMemory(.mov, reg, Memory.sib(.qword, .{ .base = reg }));
                 },
             }
@@ -3806,7 +3810,7 @@ fn store(self: *Self, ptr: MCValue, value: MCValue, ptr_ty: Type, value_ty: Type
                     const addr_lock = self.register_manager.lockRegAssumeUnused(addr_reg);
                     defer self.register_manager.unlockReg(addr_lock);
 
-                    try self.loadMemPtrIntoRegister(addr_reg, Type.usize, value);
+                    try self.loadPtrToValueIntoRegister(addr_reg, value);
                     try self.genInlineMemcpy(
                         ptr,
                         .{ .register = addr_reg },
@@ -3846,7 +3850,7 @@ fn store(self: *Self, ptr: MCValue, value: MCValue, ptr_ty: Type, value_ty: Type
             const addr_reg_lock = self.register_manager.lockRegAssumeUnused(addr_reg);
             defer self.register_manager.unlockReg(addr_reg_lock);
 
-            try self.loadMemPtrIntoRegister(addr_reg, ptr_ty, ptr);
+            try self.loadPtrToValueIntoRegister(addr_reg, ptr);
 
             const new_ptr = MCValue{ .register = addr_reg.to64() };
             try self.store(new_ptr, value, ptr_ty, value_ty);
@@ -4183,7 +4187,7 @@ fn genUnOpMir(self: *Self, mir_tag: Mir.Inst.Tag, dst_ty: Type, dst_mcv: MCValue
             const addr_reg_lock = self.register_manager.lockRegAssumeUnused(addr_reg);
             defer self.register_manager.unlockReg(addr_reg_lock);
 
-            try self.loadMemPtrIntoRegister(addr_reg, Type.usize, dst_mcv);
+            try self.loadPtrToValueIntoRegister(addr_reg, dst_mcv);
             try self.asmMemory(
                 mir_tag,
                 Memory.sib(Memory.PtrSize.fromSize(abi_size), .{ .base = addr_reg }),
@@ -4840,7 +4844,7 @@ fn genBinOp(
                         const addr_reg_lock = self.register_manager.lockRegAssumeUnused(addr_reg);
                         defer self.register_manager.unlockReg(addr_reg_lock);
 
-                        try self.loadMemPtrIntoRegister(addr_reg, Type.usize, mat_src_mcv);
+                        try self.loadPtrToValueIntoRegister(addr_reg, mat_src_mcv);
                         try self.asmCmovccRegisterMemory(
                             registerAlias(tmp_reg, abi_size),
                             Memory.sib(Memory.PtrSize.fromSize(abi_size), .{ .base = addr_reg }),
@@ -4967,7 +4971,7 @@ fn genBinOpMir(self: *Self, mir_tag: Mir.Inst.Tag, ty: Type, dst_mcv: MCValue, s
                     const dst_addr_lock = self.register_manager.lockRegAssumeUnused(dst_addr_reg);
                     errdefer self.register_manager.unlockReg(dst_addr_lock);
 
-                    try self.loadMemPtrIntoRegister(dst_addr_reg, Type.usize, dst_mcv);
+                    try self.loadPtrToValueIntoRegister(dst_addr_reg, dst_mcv);
                     break :dst .{
                         .addr_reg = dst_addr_reg,
                         .addr_lock = dst_addr_lock,
@@ -4993,7 +4997,7 @@ fn genBinOpMir(self: *Self, mir_tag: Mir.Inst.Tag, ty: Type, dst_mcv: MCValue, s
                     const src_addr_lock = self.register_manager.lockRegAssumeUnused(src_addr_reg);
                     errdefer self.register_manager.unlockReg(src_addr_lock);
 
-                    try self.loadMemPtrIntoRegister(src_addr_reg, Type.usize, src_mcv);
+                    try self.loadPtrToValueIntoRegister(src_addr_reg, src_mcv);
                     break :src .{
                         .addr_reg = src_addr_reg,
                         .addr_lock = src_addr_lock,
@@ -5356,7 +5360,7 @@ fn airBreakpoint(self: *Self) !void {
 fn airRetAddr(self: *Self, inst: Air.Inst.Index) !void {
     const result = if (self.liveness.isUnused(inst)) .dead else result: {
         const dst_mcv = try self.allocRegOrMem(inst, true);
-        try self.setRegOrMem(Type.usize, dst_mcv, .{
+        try self.setRegOrMem(typeOfAddress(), dst_mcv, .{
             .stack_offset = -@as(i32, @divExact(self.target.cpu.arch.ptrBitWidth(), 8)),
         });
         break :result dst_mcv;
@@ -5367,7 +5371,7 @@ fn airRetAddr(self: *Self, inst: Air.Inst.Index) !void {
 fn airFrameAddress(self: *Self, inst: Air.Inst.Index) !void {
     const result = if (self.liveness.isUnused(inst)) .dead else result: {
         const dst_mcv = try self.allocRegOrMem(inst, true);
-        try self.setRegOrMem(Type.usize, dst_mcv, .{ .register = .rbp });
+        try self.setRegOrMem(typeOfAddress(), dst_mcv, .{ .register = .rbp });
         break :result dst_mcv;
     };
     return self.finishAir(inst, result, .{ .none, .none, .none });
@@ -5444,7 +5448,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
             log.debug("airCall: return value on stack at offset {}", .{stack_offset});
 
             const ret_reg = abi.getCAbiIntParamRegs(self.target.*)[0];
-            try self.genSetReg(Type.usize, ret_reg, .{ .ptr_stack_offset = stack_offset });
+            try self.genSetReg(typeOfAddress(), ret_reg, .{ .ptr_stack_offset = stack_offset });
             const ret_reg_lock = self.register_manager.lockRegAssumeUnused(ret_reg);
 
             info.return_value.stack_offset = stack_offset;
@@ -5494,7 +5498,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
             } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
                 const atom_index = try coff_file.getOrCreateAtomForDecl(func.owner_decl);
                 const sym_index = coff_file.getAtom(atom_index).getSymbolIndex().?;
-                try self.genSetReg(Type.usize, .rax, .{ .linker_load = .{
+                try self.genSetReg(typeOfAddress(), .rax, .{ .linker_load = .{
                     .type = .got,
                     .sym_index = sym_index,
                 } });
@@ -5502,7 +5506,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
             } else if (self.bin_file.cast(link.File.MachO)) |macho_file| {
                 const atom_index = try macho_file.getOrCreateAtomForDecl(func.owner_decl);
                 const sym_index = macho_file.getAtom(atom_index).getSymbolIndex().?;
-                try self.genSetReg(Type.usize, .rax, .{ .linker_load = .{
+                try self.genSetReg(typeOfAddress(), .rax, .{ .linker_load = .{
                     .type = .got,
                     .sym_index = sym_index,
                 } });
@@ -5526,7 +5530,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
             const lib_name = mem.sliceTo(extern_fn.lib_name, 0);
             if (self.bin_file.cast(link.File.Coff)) |coff_file| {
                 const sym_index = try coff_file.getGlobalSymbol(decl_name, lib_name);
-                try self.genSetReg(Type.usize, .rax, .{
+                try self.genSetReg(typeOfAddress(), .rax, .{
                     .linker_load = .{
                         .type = .import,
                         .sym_index = sym_index,
@@ -5554,7 +5558,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
     } else {
         assert(ty.zigTypeTag() == .Pointer);
         const mcv = try self.resolveInst(callee);
-        try self.genSetReg(Type.usize, .rax, mcv);
+        try self.genSetReg(typeOfAddress(), .rax, mcv);
         try self.asmRegister(.call, .rax);
     }
 
@@ -5603,7 +5607,7 @@ fn airRet(self: *Self, inst: Air.Inst.Index) !void {
             assert(ret_ty.isError());
         },
         .stack_offset => {
-            try self.store(self.ret_mcv, operand, Type.usize, ret_ty);
+            try self.store(self.ret_mcv, operand, typeOfAddress(), ret_ty);
         },
         else => {
             try self.setRegOrMem(ret_ty, self.ret_mcv, operand);
@@ -5628,7 +5632,7 @@ fn airRetLoad(self: *Self, inst: Air.Inst.Index) !void {
             assert(elem_ty.isError());
         },
         .stack_offset => {
-            const reg = try self.copyToTmpRegister(Type.usize, self.ret_mcv);
+            const reg = try self.copyToTmpRegister(typeOfAddress(), self.ret_mcv);
             const reg_lock = self.register_manager.lockRegAssumeUnused(reg);
             defer self.register_manager.unlockReg(reg_lock);
 
@@ -5735,7 +5739,7 @@ fn airCmpLtErrorsLen(self: *Self, inst: Air.Inst.Index) !void {
                 4, // dword alignment
             );
             const sym_index = coff_file.getAtom(atom_index).getSymbolIndex().?;
-            try self.genSetReg(Type.usize, addr_reg, .{ .linker_load = .{
+            try self.genSetReg(typeOfAddress(), addr_reg, .{ .linker_load = .{
                 .type = .got,
                 .sym_index = sym_index,
             } });
@@ -5745,7 +5749,7 @@ fn airCmpLtErrorsLen(self: *Self, inst: Air.Inst.Index) !void {
                 4, // dword alignment
             );
             const sym_index = macho_file.getAtom(atom_index).getSymbolIndex().?;
-            try self.genSetReg(Type.usize, addr_reg, .{ .linker_load = .{
+            try self.genSetReg(typeOfAddress(), addr_reg, .{ .linker_load = .{
                 .type = .got,
                 .sym_index = sym_index,
             } });
@@ -6015,7 +6019,7 @@ fn isNull(self: *Self, inst: Air.Inst.Index, opt_ty: Type, opt_mcv: MCValue) !MC
             const addr_reg_lock = self.register_manager.lockRegAssumeUnused(addr_reg);
             defer self.register_manager.unlockReg(addr_reg_lock);
 
-            try self.loadMemPtrIntoRegister(addr_reg, Type.usize, opt_mcv);
+            try self.loadPtrToValueIntoRegister(addr_reg, opt_mcv);
 
             const some_abi_size = @intCast(u32, some_info.ty.abiSize(self.target.*));
             try self.asmMemoryImmediate(.cmp, Memory.sib(
@@ -6935,7 +6939,7 @@ fn genSetStackArg(self: *Self, ty: Type, stack_offset: i32, mcv: MCValue) InnerE
             const addr_lock = self.register_manager.lockRegAssumeUnused(addr_reg);
             defer self.register_manager.unlockReg(addr_lock);
 
-            try self.loadMemPtrIntoRegister(addr_reg, Type.usize, mcv);
+            try self.loadPtrToValueIntoRegister(addr_reg, mcv);
             try self.genInlineMemcpy(
                 .{ .ptr_stack_offset = stack_offset },
                 .{ .register = addr_reg },
@@ -7143,7 +7147,7 @@ fn genSetStack(self: *Self, ty: Type, stack_offset: i32, mcv: MCValue, opts: Inl
             const addr_lock = self.register_manager.lockRegAssumeUnused(addr_reg);
             defer self.register_manager.unlockReg(addr_lock);
 
-            try self.loadMemPtrIntoRegister(addr_reg, Type.usize, mcv);
+            try self.loadPtrToValueIntoRegister(addr_reg, mcv);
             try self.genInlineMemcpy(
                 .{ .ptr_stack_offset = stack_offset },
                 .{ .register = addr_reg },
@@ -7254,7 +7258,7 @@ fn genInlineMemcpy(
 
     switch (dst_ptr) {
         .memory_load, .linker_load => {
-            try self.loadMemPtrIntoRegister(.rdi, Type.usize, dst_ptr);
+            try self.loadPtrToValueIntoRegister(.rdi, dst_ptr);
         },
         .stack_offset, .ptr_stack_offset => |off| {
             try self.asmRegisterMemory(switch (dst_ptr) {
@@ -7280,7 +7284,7 @@ fn genInlineMemcpy(
 
     switch (src_ptr) {
         .memory_load, .linker_load => {
-            try self.loadMemPtrIntoRegister(.rsi, Type.usize, src_ptr);
+            try self.loadPtrToValueIntoRegister(.rsi, src_ptr);
         },
         .stack_offset, .ptr_stack_offset => |off| {
             try self.asmRegisterMemory(switch (src_ptr) {
@@ -7329,7 +7333,7 @@ fn genInlineMemset(
 
     switch (dst_ptr) {
         .memory_load, .linker_load => {
-            try self.loadMemPtrIntoRegister(.rdi, Type.usize, dst_ptr);
+            try self.loadPtrToValueIntoRegister(.rdi, dst_ptr);
         },
         .stack_offset, .ptr_stack_offset => |off| {
             try self.asmRegisterMemory(switch (dst_ptr) {
@@ -7457,7 +7461,7 @@ fn genSetReg(self: *Self, ty: Type, reg: Register, mcv: MCValue) InnerError!void
         .memory_load, .linker_load => switch (ty.zigTypeTag()) {
             .Float => {
                 const base_reg = try self.register_manager.allocReg(null, gp);
-                try self.loadMemPtrIntoRegister(base_reg, Type.usize, mcv);
+                try self.loadPtrToValueIntoRegister(base_reg, mcv);
 
                 if (intrinsicsAllowed(self.target.*, ty)) {
                     return self.asmRegisterMemory(
@@ -7478,40 +7482,11 @@ fn genSetReg(self: *Self, ty: Type, reg: Register, mcv: MCValue) InnerError!void
             else => switch (mcv) {
                 else => unreachable,
                 .memory_load, .linker_load => {
-                    try self.loadMemPtrIntoRegister(reg, Type.usize, mcv);
+                    try self.loadPtrToValueIntoRegister(reg, mcv);
+                    if (!ty.isPtrAtRuntime()) {
+                        try self.asmRegisterMemory(.mov, reg, Memory.sib(.qword, .{ .base = reg }));
+                    }
                 },
-                // TODO: bring back optimisations for direct memory load
-                // .memory_load => {
-                // if (x <= math.maxInt(i32)) {
-                //     try self.asmRegisterMemory(
-                //         .mov,
-                //         registerAlias(reg, abi_size),
-                //         Memory.sib(Memory.PtrSize.fromSize(abi_size), .{
-                //             .base = .ds,
-                //             .disp = @intCast(i32, x),
-                //         }),
-                //     );
-                // } else {
-                //     if (reg.to64() == .rax) {
-                //         // If this is RAX, we can use a direct load.
-                //         // Otherwise, we need to load the address, then indirectly load the value.
-                //         _ = try self.addInst(.{
-                //             .tag = .mov_moffs,
-                //             .ops = .rax_moffs,
-                //             .data = .{ .payload = try self.addExtra(Mir.MemoryMoffs.encode(.ds, x)) },
-                //         });
-                //     } else {
-                //         // Rather than duplicate the logic used for the move, we just use a self-call with a new MCValue.
-                //         try self.genSetReg(ty, reg, MCValue{ .immediate = x });
-                //         try self.asmRegisterMemory(
-                //             .mov,
-                //             registerAlias(reg, abi_size),
-                //             Memory.sib(Memory.PtrSize.fromSize(abi_size), .{ .base = reg.to64() }),
-                //         );
-                //     }
-                // }
-
-                // },
             },
         },
         .stack_offset => |off| {
@@ -8133,7 +8108,7 @@ fn airErrorName(self: *Self, inst: Air.Inst.Index) !void {
                 4, // dword alignment
             );
             const sym_index = coff_file.getAtom(atom_index).getSymbolIndex().?;
-            try self.genSetReg(Type.usize, addr_reg, .{ .linker_load = .{
+            try self.genSetReg(typeOfAddress(), addr_reg, .{ .linker_load = .{
                 .type = .got,
                 .sym_index = sym_index,
             } });
@@ -8143,7 +8118,7 @@ fn airErrorName(self: *Self, inst: Air.Inst.Index) !void {
                 4, // dword alignment
             );
             const sym_index = macho_file.getAtom(atom_index).getSymbolIndex().?;
-            try self.genSetReg(Type.usize, addr_reg, .{ .linker_load = .{
+            try self.genSetReg(typeOfAddress(), addr_reg, .{ .linker_load = .{
                 .type = .got,
                 .sym_index = sym_index,
             } });
@@ -8744,4 +8719,13 @@ fn intrinsicsAllowed(target: Target, ty: Type) bool {
 
 fn hasAvxSupport(target: Target) bool {
     return Target.x86.featureSetHasAny(target.cpu.features, .{ .avx, .avx2 });
+}
+
+var address_payload: Type.Payload.ElemType = .{
+    .base = .{ .tag = .single_mut_pointer },
+    .data = Type.anyopaque,
+};
+
+fn typeOfAddress() Type {
+    return Type.initPayload(&address_payload.base);
 }
