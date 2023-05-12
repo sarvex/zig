@@ -72,21 +72,21 @@ class TypePrinter:
         type_name = TypePrinter.payload_type_names.get(str(tag))
         if type_name is None:
             return None
-        return gdb.lookup_type('struct type.%s' % type_name)
+        return gdb.lookup_type(f'struct type.{type_name}')
 
     def to_string(self):
         tag = self.tag()
         if tag is None:
             return '(invalid type)'
         if self.val['tag_if_small_enough'] < TypePrinter.no_payload_count:
-            return '.%s' % str(tag)
+            return f'.{str(tag)}'
         return None
 
     def children(self):
         if self.val['tag_if_small_enough'] < TypePrinter.no_payload_count:
             return
 
-        yield ('tag', '.%s' % str(self.tag()))
+        yield ('tag', f'.{str(self.tag())}')
 
         payload_type = self.payload_type()
         if payload_type is not None:
@@ -162,21 +162,21 @@ class ValuePrinter:
         type_name = ValuePrinter.payload_type_names.get(str(tag))
         if type_name is None:
             return None
-        return gdb.lookup_type('struct value.%s' % type_name)
+        return gdb.lookup_type(f'struct value.{type_name}')
 
     def to_string(self):
         tag = self.tag()
         if tag is None:
             return '(invalid value)'
         if self.val['tag_if_small_enough'] < ValuePrinter.no_payload_count:
-            return '.%s' % str(tag)
+            return f'.{str(tag)}'
         return None
 
     def children(self):
         if self.val['tag_if_small_enough'] < ValuePrinter.no_payload_count:
             return
 
-        yield ('tag', '.%s' % str(self.tag()))
+        yield ('tag', f'.{str(self.tag())}')
 
         payload_type = self.payload_type()
         if payload_type is not None:

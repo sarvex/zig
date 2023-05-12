@@ -133,10 +133,11 @@ def zig_String_decode(value, offset=0, length=None):
         s = b.decode(encoding='ascii', errors='backslashreplace')
         return s if s.isprintable() else ''.join((c if c.isprintable() else '\\x%02x' % ord(c) for c in s))
     except: return None
-def zig_String_SummaryProvider(value, _=None): return '"%s"' % zig_String_decode(value)
+def zig_String_SummaryProvider(value, _=None):
+    return f'"{zig_String_decode(value)}"'
 def zig_String_AsIdentifier(value, pred):
     string = zig_String_decode(value)
-    return string if pred(string) else '@"%s"' % string
+    return string if pred(string) else f'@"{string}"'
 
 class zig_Optional_SynthProvider:
     def __init__(self, value, _=None): self.value = value
@@ -146,7 +147,8 @@ class zig_Optional_SynthProvider:
         except: pass
     def has_children(self): return bool(self.child)
     def num_children(self): return int(self.child)
-    def get_child_index(self, name): return 0 if self.child and (name == 'child' or name == '?') else -1
+    def get_child_index(self, name):
+        return 0 if self.child and name in ['child', '?'] else -1
     def get_child_at_index(self, index): return self.child if self.child and index == 0 else None
 def zig_Optional_SummaryProvider(value, _=None):
     child = value.GetChildMemberWithName('child')
@@ -214,7 +216,7 @@ class std_MultiArrayList_SynthProvider:
             self.len = 0
 
             value_type = self.value.type
-            for helper in self.value.target.FindFunctions('%s.dbHelper' % value_type.name, lldb.eFunctionNameTypeFull):
+            for helper in self.value.target.FindFunctions(f'{value_type.name}.dbHelper', lldb.eFunctionNameTypeFull):
                 ptr_self_type, ptr_child_type, ptr_field_type, ptr_entry_type = helper.function.type.GetFunctionArgumentTypes()
                 if ptr_self_type.GetPointeeType() == value_type: break
             else: return
@@ -248,7 +250,7 @@ class std_MultiArrayList_Slice_SynthProvider:
             self.len = 0
 
             value_type = self.value.type
-            for helper in self.value.target.FindFunctions('%s.dbHelper' % value_type.name, lldb.eFunctionNameTypeFull):
+            for helper in self.value.target.FindFunctions(f'{value_type.name}.dbHelper', lldb.eFunctionNameTypeFull):
                 ptr_self_type, ptr_child_type, ptr_field_type, ptr_entry_type = helper.function.type.GetFunctionArgumentTypes()
                 if ptr_self_type.GetPointeeType() == value_type: break
             else: return
@@ -285,7 +287,7 @@ class std_HashMapUnmanaged_SynthProvider:
             if not self.metadata.unsigned: return
 
             value_type = self.value.type
-            for helper in self.value.target.FindFunctions('%s.dbHelper' % value_type.name, lldb.eFunctionNameTypeFull):
+            for helper in self.value.target.FindFunctions(f'{value_type.name}.dbHelper', lldb.eFunctionNameTypeFull):
                 ptr_self_type, ptr_hdr_type, ptr_entry_type = helper.function.type.GetFunctionArgumentTypes()
                 if ptr_self_type.GetPointeeType() == value_type: break
             else: return
@@ -371,7 +373,7 @@ class TagOrPayloadPtr_SynthProvider:
     def update(self):
         try:
             value_type = self.value.type
-            for helper in self.value.target.FindFunctions('%s.dbHelper' % value_type.name, lldb.eFunctionNameTypeFull):
+            for helper in self.value.target.FindFunctions(f'{value_type.name}.dbHelper', lldb.eFunctionNameTypeFull):
                 ptr_self_type, ptr_tag_to_payload_map_type = helper.function.type.GetFunctionArgumentTypes()
                 self_type = ptr_self_type.GetPointeeType()
                 if self_type == value_type: break
@@ -420,15 +422,21 @@ def type_Type_pointer(payload):
     volatile = payload.GetChildMemberWithName('volatile').unsigned
     size = payload.GetChildMemberWithName('size').value
 
-    if size == 'One': summary = '*'
-    elif size == 'Many': summary = '[*'
-    elif size == 'Slice': summary = '['
-    elif size == 'C': summary = '[*c'
-    if sentinel: summary += ':%s' % value_Value_SummaryProvider(sentinel)
+    if size == 'C':
+        summary = '[*c'
+    elif size == 'Many':
+        summary = '[*'
+    elif size == 'One':
+        if size == 'One': summary = '*'
+    elif size == 'Slice':
+        summary = '['
+    if sentinel:
+        summary += f':{value_Value_SummaryProvider(sentinel)}'
     if size != 'One': summary += ']'
     if allowzero: summary += 'allowzero '
     if align != 0 or host_size != 0 or vector_index.value != 'none': summary += 'align(%d%s%s) ' % (align, ':%d:%d' % (bit_offset, host_size) if bit_offset != 0 or host_size != 0 else '', ':?' if vector_index.value == 'runtime' else ':%d' % vector_index.unsigned if vector_index.value != 'none' else '')
-    if addrspace != 'generic': summary += 'addrspace(.%s) ' % addrspace
+    if addrspace != 'generic':
+        summary += f'addrspace(.{addrspace}) '
     if const: summary += 'const '
     if volatile: summary += 'volatile '
     summary += type_Type_SummaryProvider(pointee_type)
@@ -443,7 +451,7 @@ def type_Type_function(payload):
     cc = payload.GetChildMemberWithName('cc').value
     is_var_args = payload.GetChildMemberWithName('is_var_args').unsigned
 
-    return 'fn(%s)%s%s %s' % (', '.join(tuple(''.join(('comptime ' if comptime_param else '', 'noalias ' if noalias_bits & 1 << i else '', type_Type_SummaryProvider(param_type))) for i, (comptime_param, param_type) in enumerate(zip(comptime_params, param_types))) + (('...',) if is_var_args else ())), ' align(%d)' % alignment if alignment != 0 else '', ' callconv(.%s)' % cc if cc != 'Unspecified' else '', type_Type_SummaryProvider(return_type))
+    return f"fn({', '.join(tuple(''.join(('comptime ' if comptime_param else '', 'noalias ' if noalias_bits & 1 << i else '', type_Type_SummaryProvider(param_type))) for i, (comptime_param, param_type) in enumerate(zip(comptime_params, param_types))) + (('...', ) if is_var_args else ()))}){' align(%d)' % alignment if alignment != 0 else ''}{f' callconv(.{cc})' if cc != 'Unspecified' else ''} {type_Type_SummaryProvider(return_type)}"
 
 def type_Type_SummaryProvider(value, _=None):
     tag = value.GetChildMemberWithName('tag').value
@@ -461,12 +469,10 @@ type_tag_handlers = {
     'export_options': lambda payload: 'std.builtin.ExportOptions',
     'extern_options': lambda payload: 'std.builtin.ExternOptions',
     'type_info': lambda payload: 'std.builtin.Type',
-
     'enum_literal': lambda payload: '@TypeOf(.enum_literal)',
     'null': lambda payload: '@TypeOf(null)',
     'undefined': lambda payload: '@TypeOf(undefined)',
     'empty_struct_literal': lambda payload: '@TypeOf(.{})',
-
     'anyerror_void_error_union': lambda payload: 'anyerror!void',
     'const_slice_u8': lambda payload: '[]const u8',
     'const_slice_u8_sentinel_0': lambda payload: '[:0]const u8',
@@ -478,36 +484,86 @@ type_tag_handlers = {
     'manyptr_u8': lambda payload: '[*]u8',
     'manyptr_const_u8': lambda payload: '[*]const u8',
     'manyptr_const_u8_sentinel_0': lambda payload: '[*:0]const u8',
-
     'function': type_Type_function,
-    'error_union': lambda payload: '%s!%s' % (type_Type_SummaryProvider(payload.GetChildMemberWithName('error_set')), type_Type_SummaryProvider(payload.GetChildMemberWithName('payload'))),
+    'error_union': lambda payload: f"{type_Type_SummaryProvider(payload.GetChildMemberWithName('error_set'))}!{type_Type_SummaryProvider(payload.GetChildMemberWithName('payload'))}",
     'array_u8': lambda payload: '[%d]u8' % payload.unsigned,
     'array_u8_sentinel_0': lambda payload: '[%d:0]u8' % payload.unsigned,
-    'vector': lambda payload: '@Vector(%d, %s)' % (payload.GetChildMemberWithName('len').unsigned, type_Type_SummaryProvider(payload.GetChildMemberWithName('elem_type'))),
-    'array': lambda payload: '[%d]%s' % (payload.GetChildMemberWithName('len').unsigned, type_Type_SummaryProvider(payload.GetChildMemberWithName('elem_type'))),
-    'array_sentinel': lambda payload: '[%d:%s]%s' % (payload.GetChildMemberWithName('len').unsigned, value_Value_SummaryProvider(payload.GetChildMemberWithName('sentinel')), type_Type_SummaryProvider(payload.GetChildMemberWithName('elem_type'))),
-    'tuple': lambda payload: 'tuple{%s}' % ', '.join(('comptime %%s = %s' % value_Value_SummaryProvider(value) if value.GetChildMemberWithName('tag').value != 'unreachable_value' else '%s') % type_Type_SummaryProvider(type) for type, value in zip(payload.GetChildMemberWithName('types').children, payload.GetChildMemberWithName('values').children)),
-    'anon_struct': lambda payload: 'struct{%s}' % ', '.join(('comptime %%s: %%s = %s' % value_Value_SummaryProvider(value) if value.GetChildMemberWithName('tag').value != 'unreachable_value' else '%s: %s') % (zig_String_AsIdentifier(name, zig_IsFieldName), type_Type_SummaryProvider(type)) for name, type, value in zip(payload.GetChildMemberWithName('names').children, payload.GetChildMemberWithName('types').children, payload.GetChildMemberWithName('values').children)),
+    'vector': lambda payload: '@Vector(%d, %s)'
+    % (
+        payload.GetChildMemberWithName('len').unsigned,
+        type_Type_SummaryProvider(payload.GetChildMemberWithName('elem_type')),
+    ),
+    'array': lambda payload: '[%d]%s'
+    % (
+        payload.GetChildMemberWithName('len').unsigned,
+        type_Type_SummaryProvider(payload.GetChildMemberWithName('elem_type')),
+    ),
+    'array_sentinel': lambda payload: '[%d:%s]%s'
+    % (
+        payload.GetChildMemberWithName('len').unsigned,
+        value_Value_SummaryProvider(
+            payload.GetChildMemberWithName('sentinel')
+        ),
+        type_Type_SummaryProvider(payload.GetChildMemberWithName('elem_type')),
+    ),
+    'tuple': lambda payload: 'tuple{%s}'
+    % ', '.join(
+        (
+            'comptime %%s = %s' % value_Value_SummaryProvider(value)
+            if value.GetChildMemberWithName('tag').value != 'unreachable_value'
+            else '%s'
+        )
+        % type_Type_SummaryProvider(type)
+        for type, value in zip(
+            payload.GetChildMemberWithName('types').children,
+            payload.GetChildMemberWithName('values').children,
+        )
+    ),
+    'anon_struct': lambda payload: 'struct{%s}'
+    % ', '.join(
+        (
+            'comptime %%s: %%s = %s' % value_Value_SummaryProvider(value)
+            if value.GetChildMemberWithName('tag').value != 'unreachable_value'
+            else '%s: %s'
+        )
+        % (
+            zig_String_AsIdentifier(name, zig_IsFieldName),
+            type_Type_SummaryProvider(type),
+        )
+        for name, type, value in zip(
+            payload.GetChildMemberWithName('names').children,
+            payload.GetChildMemberWithName('types').children,
+            payload.GetChildMemberWithName('values').children,
+        )
+    ),
     'pointer': type_Type_pointer,
-    'single_const_pointer': lambda payload: '*const %s' % type_Type_SummaryProvider(payload),
-    'single_mut_pointer': lambda payload: '*%s' % type_Type_SummaryProvider(payload),
-    'many_const_pointer': lambda payload: '[*]const %s' % type_Type_SummaryProvider(payload),
-    'many_mut_pointer': lambda payload: '[*]%s' % type_Type_SummaryProvider(payload),
-    'c_const_pointer': lambda payload: '[*c]const %s' % type_Type_SummaryProvider(payload),
-    'c_mut_pointer': lambda payload: '[*c]%s' % type_Type_SummaryProvider(payload),
-    'const_slice': lambda payload: '[]const %s' % type_Type_SummaryProvider(payload),
-    'mut_slice': lambda payload: '[]%s' % type_Type_SummaryProvider(payload),
+    'single_const_pointer': lambda payload: f'*const {type_Type_SummaryProvider(payload)}',
+    'single_mut_pointer': lambda payload: f'*{type_Type_SummaryProvider(payload)}',
+    'many_const_pointer': lambda payload: f'[*]const {type_Type_SummaryProvider(payload)}',
+    'many_mut_pointer': lambda payload: f'[*]{type_Type_SummaryProvider(payload)}',
+    'c_const_pointer': lambda payload: f'[*c]const {type_Type_SummaryProvider(payload)}',
+    'c_mut_pointer': lambda payload: f'[*c]{type_Type_SummaryProvider(payload)}',
+    'const_slice': lambda payload: f'[]const {type_Type_SummaryProvider(payload)}',
+    'mut_slice': lambda payload: f'[]{type_Type_SummaryProvider(payload)}',
     'int_signed': lambda payload: 'i%d' % payload.unsigned,
     'int_unsigned': lambda payload: 'u%d' % payload.unsigned,
-    'optional': lambda payload: '?%s' % type_Type_SummaryProvider(payload),
-    'optional_single_mut_pointer': lambda payload: '?*%s' % type_Type_SummaryProvider(payload),
-    'optional_single_const_pointer': lambda payload: '?*const %s' % type_Type_SummaryProvider(payload),
-    'anyframe_T': lambda payload: 'anyframe->%s' % type_Type_SummaryProvider(payload),
-    'error_set': lambda payload: type_tag_handlers['error_set_merged'](payload.GetChildMemberWithName('names')),
-    'error_set_single': lambda payload: 'error{%s}' % zig_String_AsIdentifier(payload, zig_IsFieldName),
-    'error_set_merged': lambda payload: 'error{%s}' % ','.join(zig_String_AsIdentifier(child.GetChildMemberWithName('key'), zig_IsFieldName) for child in payload.GetChildMemberWithName('entries').children),
-    'error_set_inferred': lambda payload: '@typeInfo(@typeInfo(@TypeOf(%s)).Fn.return_type.?).ErrorUnion.error_set' % OwnerDecl_RenderFullyQualifiedName(payload.GetChildMemberWithName('func')),
-
+    'optional': lambda payload: f'?{type_Type_SummaryProvider(payload)}',
+    'optional_single_mut_pointer': lambda payload: f'?*{type_Type_SummaryProvider(payload)}',
+    'optional_single_const_pointer': lambda payload: f'?*const {type_Type_SummaryProvider(payload)}',
+    'anyframe_T': lambda payload: f'anyframe->{type_Type_SummaryProvider(payload)}',
+    'error_set': lambda payload: type_tag_handlers['error_set_merged'](
+        payload.GetChildMemberWithName('names')
+    ),
+    'error_set_single': lambda payload: 'error{%s}'
+    % zig_String_AsIdentifier(payload, zig_IsFieldName),
+    'error_set_merged': lambda payload: 'error{%s}'
+    % ','.join(
+        zig_String_AsIdentifier(
+            child.GetChildMemberWithName('key'), zig_IsFieldName
+        )
+        for child in payload.GetChildMemberWithName('entries').children
+    ),
+    'error_set_inferred': lambda payload: f"@typeInfo(@typeInfo(@TypeOf({OwnerDecl_RenderFullyQualifiedName(payload.GetChildMemberWithName('func'))})).Fn.return_type.?).ErrorUnion.error_set",
     'enum_full': OwnerDecl_RenderFullyQualifiedName,
     'enum_nonexhaustive': OwnerDecl_RenderFullyQualifiedName,
     'enum_numbered': OwnerDecl_RenderFullyQualifiedName,
@@ -524,7 +580,7 @@ def value_Value_str_lit(payload):
         mod = frame.FindVariable('mod') or frame.FindVariable('module')
         if mod: break
     else: return
-    return '"%s"' % zig_String_decode(mod.GetChildMemberWithName('string_literal_bytes').GetChildMemberWithName('items'), payload.GetChildMemberWithName('index').unsigned, payload.GetChildMemberWithName('len').unsigned)
+    return f""""{zig_String_decode(mod.GetChildMemberWithName('string_literal_bytes').GetChildMemberWithName('items'), payload.GetChildMemberWithName('index').unsigned, payload.GetChildMemberWithName('len').unsigned)}\""""
 
 def value_Value_SummaryProvider(value, _=None):
     tag = value.GetChildMemberWithName('tag').value
@@ -539,55 +595,96 @@ value_tag_handlers = {
     'null_value': lambda payload: 'null',
     'bool_true': lambda payload: 'true',
     'bool_false': lambda payload: 'false',
-
     'empty_struct_value': lambda payload: '.{}',
     'empty_array': lambda payload: '.{}',
-
     'ty': type_Type_SummaryProvider,
-    'int_type': lambda payload: '%c%d' % (payload.GetChildMemberWithName('bits').unsigned, 's' if payload.GetChildMemberWithName('signed').unsigned == 1 else 'u'),
+    'int_type': lambda payload: '%c%d'
+    % (
+        payload.GetChildMemberWithName('bits').unsigned,
+        's' if payload.GetChildMemberWithName('signed').unsigned == 1 else 'u',
+    ),
     'int_u64': lambda payload: '%d' % payload.unsigned,
     'int_i64': lambda payload: '%d' % payload.signed,
-    'int_big_positive': lambda payload: sum(child.unsigned << i * child.type.size * 8 for i, child in enumerate(payload.children)),
-    'int_big_negative': lambda payload: '-%s' % value_tag_handlers['int_big_positive'](payload),
+    'int_big_positive': lambda payload: sum(
+        child.unsigned << i * child.type.size * 8
+        for i, child in enumerate(payload.children)
+    ),
+    'int_big_negative': lambda payload: f"-{value_tag_handlers['int_big_positive'](payload)}",
     'function': OwnerDecl_RenderFullyQualifiedName,
     'extern_fn': OwnerDecl_RenderFullyQualifiedName,
-    'variable': lambda payload: value_Value_SummaryProvider(payload.GetChildMemberWithName('decl').GetChildMemberWithName('val')),
+    'variable': lambda payload: value_Value_SummaryProvider(
+        payload.GetChildMemberWithName('decl').GetChildMemberWithName('val')
+    ),
     'runtime_value': value_Value_SummaryProvider,
-    'decl_ref': lambda payload: value_Value_SummaryProvider(payload.GetChildMemberWithName('decl').GetChildMemberWithName('val')),
-    'decl_ref_mut': lambda payload: value_Value_SummaryProvider(payload.GetChildMemberWithName('decl_index').GetChildMemberWithName('decl').GetChildMemberWithName('val')),
-    'comptime_field_ptr': lambda payload: '&%s' % value_Value_SummaryProvider(payload.GetChildMemberWithName('field_val')),
-    'elem_ptr': lambda payload: '(%s)[%d]' % (value_Value_SummaryProvider(payload.GetChildMemberWithName('array_ptr')), payload.GetChildMemberWithName('index').unsigned),
-    'field_ptr': lambda payload: '(%s).field[%d]' % (value_Value_SummaryProvider(payload.GetChildMemberWithName('container_ptr')), payload.GetChildMemberWithName('field_index').unsigned),
-    'bytes': lambda payload: '"%s"' % zig_String_decode(payload),
+    'decl_ref': lambda payload: value_Value_SummaryProvider(
+        payload.GetChildMemberWithName('decl').GetChildMemberWithName('val')
+    ),
+    'decl_ref_mut': lambda payload: value_Value_SummaryProvider(
+        payload.GetChildMemberWithName('decl_index')
+        .GetChildMemberWithName('decl')
+        .GetChildMemberWithName('val')
+    ),
+    'comptime_field_ptr': lambda payload: f"&{value_Value_SummaryProvider(payload.GetChildMemberWithName('field_val'))}",
+    'elem_ptr': lambda payload: '(%s)[%d]'
+    % (
+        value_Value_SummaryProvider(
+            payload.GetChildMemberWithName('array_ptr')
+        ),
+        payload.GetChildMemberWithName('index').unsigned,
+    ),
+    'field_ptr': lambda payload: '(%s).field[%d]'
+    % (
+        value_Value_SummaryProvider(
+            payload.GetChildMemberWithName('container_ptr')
+        ),
+        payload.GetChildMemberWithName('field_index').unsigned,
+    ),
+    'bytes': lambda payload: f'"{zig_String_decode(payload)}"',
     'str_lit': value_Value_str_lit,
-    'repeated': lambda payload: '.{%s} ** _' % value_Value_SummaryProvider(payload),
-    'empty_array_sentinel': lambda payload: '.{%s}' % value_Value_SummaryProvider(payload),
-    'slice': lambda payload: '(%s)[0..%s]' % tuple(value_Value_SummaryProvider(payload.GetChildMemberWithName(name)) for name in ('ptr', 'len')),
+    'repeated': lambda payload: '.{%s} ** _'
+    % value_Value_SummaryProvider(payload),
+    'empty_array_sentinel': lambda payload: '.{%s}'
+    % value_Value_SummaryProvider(payload),
+    'slice': lambda payload: '(%s)[0..%s]'
+    % tuple(
+        value_Value_SummaryProvider(payload.GetChildMemberWithName(name))
+        for name in ('ptr', 'len')
+    ),
     'float_16': lambda payload: payload.value,
     'float_32': lambda payload: payload.value,
     'float_64': lambda payload: payload.value,
     'float_80': lambda payload: payload.value,
     'float_128': lambda payload: payload.value,
-    'enum_literal': lambda payload: '.%s' % zig_String_AsIdentifier(payload, zig_IsFieldName),
+    'enum_literal': lambda payload: f'.{zig_String_AsIdentifier(payload, zig_IsFieldName)}',
     'enum_field_index': lambda payload: 'field[%d]' % payload.unsigned,
-    'error': lambda payload: 'error.%s' % zig_String_AsIdentifier(payload.GetChildMemberWithName('name'), zig_IsFieldName),
+    'error': lambda payload: f"error.{zig_String_AsIdentifier(payload.GetChildMemberWithName('name'), zig_IsFieldName)}",
     'eu_payload': value_Value_SummaryProvider,
-    'eu_payload_ptr': lambda payload: '&((%s).* catch unreachable)' % value_Value_SummaryProvider(payload.GetChildMemberWithName('container_ptr')),
+    'eu_payload_ptr': lambda payload: f"&(({value_Value_SummaryProvider(payload.GetChildMemberWithName('container_ptr'))}).* catch unreachable)",
     'opt_payload': value_Value_SummaryProvider,
-    'opt_payload_ptr': lambda payload: '&(%s).*.?' % value_Value_SummaryProvider(payload.GetChildMemberWithName('container_ptr')),
-    'aggregate': lambda payload: '.{%s}' % ', '.join(map(value_Value_SummaryProvider, payload.children)),
-    'union': lambda payload: '.{.%s = %s}' % tuple(value_Value_SummaryProvider(payload.GetChildMemberWithName(name)) for name in ('tag', 'val')),
-
-    'lazy_align': lambda payload: '@alignOf(%s)' % type_Type_SummaryProvider(payload),
-    'lazy_size': lambda payload: '@sizeOf(%s)' % type_Type_SummaryProvider(payload),
+    'opt_payload_ptr': lambda payload: f"&({value_Value_SummaryProvider(payload.GetChildMemberWithName('container_ptr'))}).*.?",
+    'aggregate': lambda payload: '.{%s}'
+    % ', '.join(map(value_Value_SummaryProvider, payload.children)),
+    'union': lambda payload: '.{.%s = %s}'
+    % tuple(
+        value_Value_SummaryProvider(payload.GetChildMemberWithName(name))
+        for name in ('tag', 'val')
+    ),
+    'lazy_align': lambda payload: f'@alignOf({type_Type_SummaryProvider(payload)})',
+    'lazy_size': lambda payload: f'@sizeOf({type_Type_SummaryProvider(payload)})',
 }
 
 # Initialize
 
 def add(debugger, *, category, regex=False, type, identifier=None, synth=False, inline_children=False, expand=False, summary=False):
     prefix = '.'.join((__name__, (identifier or type).replace('.', '_').replace(':', '_')))
-    if summary: debugger.HandleCommand('type summary add --category %s%s%s "%s"' % (category, ' --inline-children' if inline_children else ''.join((' --expand' if expand else '', ' --python-function %s_SummaryProvider' % prefix if summary == True else ' --summary-string "%s"' % summary)), ' --regex' if regex else '', type))
-    if synth: debugger.HandleCommand('type synthetic add --category %s%s --python-class %s_SynthProvider "%s"' % (category, ' --regex' if regex else '', prefix, type))
+    if summary:
+        debugger.HandleCommand(
+            f"""type summary add --category {category}{' --inline-children' if inline_children else ''.join((' --expand' if expand else '', f' --python-function {prefix}_SummaryProvider' if summary == True else f' --summary-string "{summary}"'))}{' --regex' if regex else ''} "{type}\""""
+        )
+    if synth:
+        debugger.HandleCommand(
+            f"""type synthetic add --category {category}{' --regex' if regex else ''} --python-class {prefix}_SynthProvider "{type}\""""
+        )
 
 def MultiArrayList_Entry(type): return '^multi_array_list\\.MultiArrayList\\(%s\\)\\.Entry__struct_[1-9][0-9]*$' % type
 

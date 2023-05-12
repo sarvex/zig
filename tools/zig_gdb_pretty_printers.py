@@ -15,9 +15,7 @@ class ZigPrettyPrinter(gdb.printing.PrettyPrinter):
             return StringPrinter(val)
         if tag.startswith('[]'):
             return SlicePrinter(val)
-        if tag.startswith('?'):
-            return OptionalPrinter(val)
-        return None
+        return OptionalPrinter(val) if tag.startswith('?') else None
 
 
 class SlicePrinter:
@@ -54,10 +52,7 @@ class OptionalPrinter:
         self.val = val
 
     def to_string(self):
-        if self.val['some']:
-            return self.val['data']
-        else:
-            return 'null'
+        return self.val['data'] if self.val['some'] else 'null'
 
 
 gdb.printing.register_pretty_printer(gdb.current_objfile(), ZigPrettyPrinter())
